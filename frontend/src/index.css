@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-dark-bg text-white font-sans overflow-x-hidden;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-dark-card/60 backdrop-blur-xl border border-dark-border rounded-xl;
+  }
+  
+  .neon-text-blue {
+    text-shadow: 0 0 10px #00f3ff, 0 0 20px #00f3ff;
+  }
+  
+  .neon-border-blue {
+    box-shadow: 0 0 5px #00f3ff, inset 0 0 5px #00f3ff;
+  }
+}

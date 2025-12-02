@@ -1,0 +1,226 @@
+<!doctype html>
+<html>
+
+<head>
+    <meta charset="utf-8" />
+    <title>Smart HUD - Browser</title>
+    <style>
+        body {
+            margin: 0;
+            background: #000;
+            color: #0ff;
+            font-family: system-ui, sans-serif;
+        }
+        
+        .topbar {
+            padding: 8px;
+            background: #050505;
+            color: #fff;
+            display: flex;
+            gap: 16px;
+            align-items: center;
+        }
+        
+        .left {
+            padding: 12px;
+        }
+        
+        #cameraWrap {
+            position: relative;
+            display: inline-block;
+            margin: 12px;
+        }
+        
+        video#local {
+            width: 920px;
+            height: auto;
+            border-radius: 6px;
+            background: #111;
+        }
+        
+        canvas#overlay {
+            position: absolute;
+            left: 0;
+            top: 0;
+            pointer-events: none;
+        }
+        
+        form {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        
+        input,
+        button {
+            padding: 6px 8px;
+            border-radius: 6px;
+            border: 1px solid #333;
+            background: #111;
+            color: #fff;
+        }
+        
+        label {
+            color: #ddd;
+            font-size: 13px;
+        }
+        
+        .sample {
+            max-width: 120px;
+            border-radius: 6px;
+        }
+    </style>
+</head>
+
+<body>
+    <div class="topbar">
+        <div><strong>Smart Glasses HUD — Browser</strong></div>
+        <div style="margin-left:auto;">
+            <form id="enrollForm" enctype="multipart/form-data">
+                <label>Photo</label>
+                <input type="file" id="file" name="file" accept="image/*" />
+                <input type="text" id="name" name="name" placeholder="Name" />
+                <input type="text" id="identity" name="identity" placeholder="ID" />
+                <input type="text" id="phone" name="phone" placeholder="Phone" />
+                <input type="text" id="instagram" name="instagram" placeholder="Instagram" />
+                <button type="submit">Add Person</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="left">
+        <div id="cameraWrap">
+            <video id="local" autoplay muted playsinline></video>
+            <canvas id="overlay"></canvas>
+        </div>
+        <div style="margin-top:8px; color:#ccc;">
+            Sample image (you uploaded):<br/>
+            <img class="sample" src="/static_sample_image" alt="sample" />
+        </div>
+    </div>
+
+    <script>
+        (async function() {
+            // show local camera
+            const video = document.getElementById('local');
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        width: 1280
+                    },
+                    audio: false
+                });
+                video.srcObject = stream;
+            } catch (e) {
+                alert('Camera access denied or not available.');
+                console.error(e);
+            }
+
+            // canvas size sync
+            const canvas = document.getElementById('overlay');
+
+            function resizeCanvas() {
+                canvas.width = video.clientWidth;
+                canvas.height = video.clientHeight;
+            }
+            video.addEventListener('loadeddata', resizeCanvas);
+            window.addEventListener('resize', resizeCanvas);
+
+            const ctx = canvas.getContext('2d');
+
+            // polling for latest detections
+            async function fetchLatest() {
+                try {
+                    const res = await fetch('/latest');
+                    const j = await res.json();
+                    return j;
+                } catch (e) {
+                    return null;
+                }
+            }
+
+            function draw(dets) {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+                // video element may have different resolution than server camera;
+                // we draw boxes proportionally using video display size.
+                const vw = video.clientWidth;
+                const vh = video.clientHeight;
+                // server sends bboxes relative to server camera resolution; this is best-effort.
+                for (const d of dets || []) {
+                    const [x, y, w, h] = d.bbox;
+                    // map roughly: assume server used 1280x720; scale to displayed size
+                    const scaleX = vw / 1280;
+                    const scaleY = vh / 720;
+                    const rx = x * scaleX,
+                        ry = y * scaleY,
+                        rw = w * scaleX,
+                        rh = h * scaleY;
+                    // box
+                    ctx.strokeStyle = d.name === 'Unknown' ? '#ff8a00' : '#00ffcc';
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(rx, ry, rw, rh);
+                    // label background
+                    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+                    ctx.fillRect(rx, ry - 28, Math.min(260, rw + 120), 26);
+                    // text
+                    ctx.fillStyle = '#fff';
+                    ctx.font = '16px sans-serif';
+                    ctx.fillText(`${d.name} (${(d.score||0).toFixed(2)})`, rx + 6, ry - 8);
+
+                    // details
+                    if (d.details && d.details.phone) {
+                        ctx.fillStyle = '#cfc';
+                        ctx.fillText(`${d.details.phone}`, rx + 6, ry + rh + 18);
+                    }
+                    if (d.details && d.details.instagram) {
+                        ctx.fillStyle = '#9cf';
+                        ctx.fillText(`IG: ${d.details.instagram}`, rx + 6, ry + rh + 36);
+                    }
+                }
+            }
+
+            // poll loop
+            setInterval(async() => {
+                const j = await fetchLatest();
+                if (!j) return;
+                draw(j.detections || []);
+            }, 500);
+
+            // enroll form
+            document.getElementById('enrollForm').addEventListener('submit', async(ev) => {
+                ev.preventDefault();
+                const f = document.getElementById('file').files[0];
+                const name = document.getElementById('name').value.trim();
+                if (!f || !name) {
+                    alert('Select file and enter name');
+                    return;
+                }
+                const form = new FormData();
+                form.append('file', f);
+                form.append('name', name);
+                form.append('identity', document.getElementById('identity').value.trim());
+                form.append('phone', document.getElementById('phone').value.trim());
+                form.append('instagram', document.getElementById('instagram').value.trim());
+
+                const res = await fetch('/enroll', {
+                    method: 'POST',
+                    body: form
+                });
+                const j = await res.json();
+                if (j.ok) {
+                    alert('Enrolled: ' + j.file + '. Server rebuilt DB.');
+                    // optionally re-run enroll_orb on server already happened
+                } else {
+                    alert('Enroll failed: ' + (j.error || 'unknown'));
+                }
+            });
+
+            // sample image (the developer asked me to include your uploaded image path)
+            // the server will serve it via this special endpoint below.
+            const img = document.querySelector('.sample');
+            img.src = '/sample_image';
+        })();
+    </script>
+</body>
+
+</html>
