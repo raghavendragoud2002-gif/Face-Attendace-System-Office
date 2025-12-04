@@ -284,8 +284,12 @@ def employee_operations(id):
 
 @app.route('/api/attendance/daily', methods=['GET'])
 def daily_attendance():
-    filter_type = request.args.get('filter', 'today') # today, month
+    from datetime import timedelta
+    
+    filter_type = request.args.get('filter', 'today') # today, month, yesterday, last_7_days, last_30_days, last_month, custom
     status_filter = request.args.get('status', 'All') # All, Present, Late, Absent
+    start_date_str = request.args.get('start_date')  # For custom date range (YYYY-MM-DD)
+    end_date_str = request.args.get('end_date')      # For custom date range (YYYY-MM-DD)
 
     if not DB_ONLINE:
         # Offline Mode (Simplified: returns all records for today, ignoring filters for now)
@@ -340,11 +344,51 @@ def daily_attendance():
         
         today = date.today()
         
-        # Date Filter
+        # Date Filter - Enhanced with more options
         if filter_type == 'today':
             query += " AND a.date = %s"
             params.append(today)
+        elif filter_type == 'yesterday':
+            yesterday = today - timedelta(days=1)
+            query += " AND a.date = %s"
+            params.append(yesterday)
+        elif filter_type == 'last_7_days':
+            start = today - timedelta(days=6)
+            query += " AND a.date BETWEEN %s AND %s"
+            params.append(start)
+            params.append(today)
+        elif filter_type == 'last_30_days':
+            start = today - timedelta(days=29)
+            query += " AND a.date BETWEEN %s AND %s"
+            params.append(start)
+            params.append(today)
+        elif filter_type == 'this_month':
+            query += " AND MONTH(a.date) = %s AND YEAR(a.date) = %s"
+            params.append(today.month)
+            params.append(today.year)
+        elif filter_type == 'last_month':
+            # Calculate last month
+            first_of_month = today.replace(day=1)
+            last_month_end = first_of_month - timedelta(days=1)
+            last_month_start = last_month_end.replace(day=1)
+            query += " AND a.date BETWEEN %s AND %s"
+            params.append(last_month_start)
+            params.append(last_month_end)
+        elif filter_type == 'custom' and start_date_str and end_date_str:
+            # Custom date range
+            try:
+                start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+                end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+                query += " AND a.date BETWEEN %s AND %s"
+                params.append(start_date)
+                params.append(end_date)
+            except ValueError:
+                print(f"[WARN] Invalid date format: {start_date_str} or {end_date_str}")
+                # Fallback to today
+                query += " AND a.date = %s"
+                params.append(today)
         elif filter_type == 'month':
+            # Backward compatibility
             query += " AND MONTH(a.date) = %s AND YEAR(a.date) = %s"
             params.append(today.month)
             params.append(today.year)
@@ -569,9 +613,12 @@ def mark_attendance(employee_id, name):
     now_time = now.time()
     now_time_str = now.strftime("%H:%M:%S")
     today_str = str(today)
+    
+    print(f"[ATTENDANCE] Attempting to mark attendance for {name} (ID: {employee_id}) at {now_time_str}")
 
     if not DB_ONLINE:
         # Offline Attendance
+        print(f"[ATTENDANCE] Running in OFFLINE mode")
         att_records = load_offline_attendance()
         
         # Find existing record for today
@@ -593,7 +640,7 @@ def mark_attendance(employee_id, name):
                 'status': status
             }
             att_records.append(new_record)
-            print(f"[OK] First Entry (Offline): {name} ({status})")
+            print(f"[OK] First Entry (Offline): {name} ({status}) at {now_time_str}")
             save_offline_attendance(att_records)
         else:
             # Update Existing
@@ -609,7 +656,7 @@ def mark_attendance(employee_id, name):
                 existing['last_seen'] = now_time_str
                 existing['total_work_seconds'] += added_work
                 save_offline_attendance(att_records)
-                # print(f"🔄 Updated (Offline): {name}")
+                print(f"[UPDATE] Updated (Offline): {name} - Last seen: {now_time_str}, Work added: {int(added_work)}s")
             except Exception as e:
                 print(f"[WARN] Offline update error: {e}")
         return
@@ -622,15 +669,17 @@ def mark_attendance(employee_id, name):
         now_time = now.time()
         
         # 1. Resolve PK from Custom ID
+        print(f"[ATTENDANCE] Looking up employee with custom ID: {employee_id}")
         cur.execute("SELECT id FROM employees WHERE employee_id = %s", (str(employee_id),))
         emp_row = cur.fetchone()
         
         if not emp_row:
-            print(f"[ERR] Employee {name} (ID: {employee_id}) not found in DB!")
+            print(f"[ERROR] Employee {name} (ID: {employee_id}) not found in DB!")
             conn.close()
             return
             
         emp_pk = emp_row['id']
+        print(f"[ATTENDANCE] Found employee PK: {emp_pk}")
         
         # 2. Check for existing record using PK
         cur.execute("SELECT * FROM attendance WHERE employee_id = %s AND date = %s", (emp_pk, today))
@@ -648,7 +697,7 @@ def mark_attendance(employee_id, name):
                 VALUES (%s, %s, %s, %s, 0, %s)
             """, (emp_pk, today, now_time, now_time, status))
             conn.commit()
-            print(f"[OK] First Entry: {name} ({status})")
+            print(f"[OK] First Entry: {name} ({status}) at {now_time_str}")
             
         else:
             # Update Existing
@@ -681,10 +730,12 @@ def mark_attendance(employee_id, name):
                 WHERE id = %s
             """, (now_time, added_work, existing['id']))
             conn.commit()
-            # print(f"🔄 Updated: {name} (+{int(added_work)}s work)")
+            print(f"[UPDATE] Updated: {name} - Last seen: {now_time_str}, Work added: {int(added_work)}s")
         conn.close()
     except Exception as e:
-        print(f"⚠️ Attendance DB error: {e}")
+        print(f"[ERROR] Database error: {e}")
+        import traceback
+        traceback.print_exc()
 
 def start_camera_thread(cam_config):
     cam_id = cam_config['id']
@@ -747,48 +798,142 @@ def start_camera_thread(cam_config):
                     x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
                                  int(bboxC.width * iw), int(bboxC.height * ih)
                     
-                    # Draw Box
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    # Ensure valid coordinates
+                    x, y = max(0, x), max(0, y)
+                    w, h = min(w, iw - x), min(h, ih - y)
                     
-                    # Recognize
+                    # Recognize FIRST, then draw box with appropriate color
                     face_roi = frame[y:y+h, x:x+w]
-                    if face_roi.size == 0: continue
+                    if face_roi.size == 0: 
+                        continue
+                    
+                    label = "Unknown"
+                    color = (0, 0, 255)  # Red for unknown
+                    recognized = False
                     
                     try:
                         kp, des = orb.detectAndCompute(face_roi, None)
                         if des is not None and len(known) > 0:
                             best_name = "Unknown"
                             best_score = 0
+                            second_best_score = 0
+                            best_person = None
                             
                             for person in known:
-                                matches = bf.knnMatch(des, person['des'], k=2)
-                                good = []
-                                for m, n in matches:
-                                    if m.distance < 0.75 * n.distance:
-                                        good.append(m)
-                                
-                                if len(good) > best_score:
-                                    best_score = len(good)
-                                    best_name = person['name']
+                                try:
+                                    # Handle both 'desc' (new) and 'des' (old) keys for compatibility
+                                    person_des = person.get('desc')
+                                    if person_des is None:
+                                        person_des = person.get('des')
+                                        
+                                    if person_des is None:
+                                        print(f"[WARN] No descriptors found for {person.get('name')}")
+                                        continue
+
+                                    matches = bf.knnMatch(des, person_des, k=2)
+                                    good = []
+                                    for pair in matches:
+                                        if len(pair) == 2:
+                                            m, n = pair
+                                            if m.distance < 0.75 * n.distance:
+                                                good.append(m)
+                                    
+                                    # Debug: Show score for each person
+                                    print(f"[DEBUG] Comparing with {person['name']}: {len(good)} good matches")
+                                    
+                                    # Find best match
+                                    if len(good) > best_score:
+                                        # If we already had a best score, that becomes the runner-up
+                                        second_best_score = best_score
+                                        best_score = len(good)
+                                        best_name = person['name']
+                                        best_person = person
+                                    elif len(good) > second_best_score:
+                                        second_best_score = len(good)
+                                        
+                                except Exception as e:
+                                    print(f"[WARN] Matching error for {person.get('name', 'unknown')}: {e}")
+                                    continue
+                    
+                            # Threshold for recognition
+                            # Lowered to 2 because 3 was too strict for this camera/lighting
+                            # Consecutive match check lowered to 2 frames
                             
-                            if best_score > 8:
-                                label = f"{best_name}"
-                                color = (0, 255, 0)
+                            is_match = False
+                            if best_score >= 2:
+                                if best_score > second_best_score:
+                                    # Potential match found
+                                    # Check if it's the same person as last frame
+                                    if best_name == last_recognized_name:
+                                        consecutive_matches += 1
+                                    else:
+                                        consecutive_matches = 1
+                                        last_recognized_name = best_name
+                                    
+                                    print(f"[DEBUG] Potential: {best_name} ({best_score}), Consecutive: {consecutive_matches}")
+                                    
+                                    # REQUIRE 2 CONSECUTIVE FRAMES to confirm match
+                                    if consecutive_matches >= 2:
+                                        is_match = True
+                                else:
+                                    # Ambiguous
+                                    consecutive_matches = 0
+                                    last_recognized_name = None
+                                    print(f"[DEBUG] Ambiguous: {best_score} vs {second_best_score}")
+                            else:
+                                # No good match
+                                consecutive_matches = 0
+                                last_recognized_name = None
+                                print(f"[DEBUG] No match: Best score {best_score} < 3")
+                                    
+                            if is_match:
+                                label = best_name
+                                color = (0, 255, 0)  # Green for recognized
+                                recognized = True
+                                
                                 # Mark Attendance
                                 try:
-                                    emp_id_str = best_name.split('_')[0]
-                                    emp_id = int(emp_id_str) # Assuming ID is first part
-                                    mark_attendance(emp_id, best_name)
-                                except:
-                                    pass
+                                    # Extract employee ID from filename (format: ID_Name or ID_Name_Name)
+                                    parts = best_name.split('_')
+                                    if len(parts) >= 1:
+                                        emp_id_str = parts[0]
+                                        # Verify it's a valid number
+                                        if emp_id_str.isdigit():
+                                            emp_id = int(emp_id_str)
+                                            
+                                            # Check throttle to avoid spamming
+                                            current_time = time.time()
+                                            last_time = last_seen.get(emp_id, 0)
+                                            
+                                            if current_time - last_time > ATTENDANCE_THROTTLE_SECONDS:
+                                                print(f"[RECOGNITION] Recognized: {best_name} (ID: {emp_id}) - Score: {best_score}")
+                                                mark_attendance(emp_id, best_name)
+                                                last_seen[emp_id] = current_time
+                                            # else: silently skip (within throttle period)
+                                        else:
+                                            print(f"[WARN] Invalid employee ID format in filename: {best_name}")
+                                    else:
+                                        print(f"[WARN] Cannot extract employee ID from filename: {best_name}")
+                                except Exception as e:
+                                    print(f"[ERROR] Attendance marking failed for {best_name}: {e}")
+                                    import traceback
+                                    traceback.print_exc()
                             else:
                                 label = "Unknown"
-                                color = (0, 0, 255)
-                                
-                            cv2.putText(frame, label, (x, y - 10), 
-                                      cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                                color = (0, 0, 255)  # Red for unknown
+                    
                     except Exception as e:
+                        print(f"[ERROR] Recognition error: {e}")
                         pass
+                    
+                    # Draw box AFTER recognition with correct color
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
+                    
+                    # Draw label with background for better visibility
+                    label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+                    cv2.rectangle(frame, (x, y - label_size[1] - 10), (x + label_size[0], y), color, -1)
+                    cv2.putText(frame, label, (x, y - 5), 
+                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
             # Update Global Frame
             with camera_locks[cam_id]:

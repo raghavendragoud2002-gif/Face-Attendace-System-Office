@@ -1,32 +1,54 @@
 import React, { useState, useEffect } from 'react';
 import { Calendar as CalendarIcon, Download, Filter, RefreshCw } from 'lucide-react';
 import axios from 'axios';
+import DateRangeModal from '../components/DateRangeModal';
 
 const Attendance = () => {
     const [records, setRecords] = useState([]);
-    const [dateFilter, setDateFilter] = useState('today'); // today, month
+    const [dateFilter, setDateFilter] = useState('today'); // today, month, yesterday, last_7_days, last_30_days, this_month, last_month, custom
     const [statusFilter, setStatusFilter] = useState('All'); // All, Present, Late, Absent
     const [loading, setLoading] = useState(false);
+    const [showDateModal, setShowDateModal] = useState(false);
+    const [customDateRange, setCustomDateRange] = useState({ startDate: '', endDate: '' });
+    const [filterLabel, setFilterLabel] = useState('Today');
 
     useEffect(() => {
         fetchAttendance();
-    }, [dateFilter, statusFilter]);
+    }, [dateFilter, statusFilter, customDateRange]);
 
     const fetchAttendance = async () => {
         setLoading(true);
         try {
-            const res = await axios.get('http://localhost:5001/api/attendance/daily', {
-                params: {
-                    filter: dateFilter,
-                    status: statusFilter
-                }
-            });
+            const params = {
+                filter: dateFilter,
+                status: statusFilter
+            };
+
+            // Add custom date range if applicable
+            if (dateFilter === 'custom' && customDateRange.startDate && customDateRange.endDate) {
+                params.start_date = customDateRange.startDate;
+                params.end_date = customDateRange.endDate;
+            }
+
+            const res = await axios.get('http://localhost:5001/api/attendance/daily', { params });
             setRecords(res.data);
         } catch (err) {
             console.error("Error fetching attendance:", err);
         } finally {
             setLoading(false);
         }
+    };
+
+    const handleDateRangeApply = ({ startDate, endDate }) => {
+        setCustomDateRange({ startDate, endDate });
+        setDateFilter('custom');
+        setFilterLabel(`${startDate} to ${endDate}`);
+    };
+
+    const handleQuickFilter = (filter, label) => {
+        setDateFilter(filter);
+        setFilterLabel(label);
+        setCustomDateRange({ startDate: '', endDate: '' });
     };
 
     const exportCSV = () => {
@@ -78,20 +100,44 @@ const Attendance = () => {
             </div>
 
             {/* Filters */}
-            <div className="glass-panel p-4 flex gap-4 items-center">
+            <div className="glass-panel p-4 flex gap-4 items-center flex-wrap">
                 <Filter size={18} className="text-neon-blue" />
-                <div className="flex gap-4 flex-1">
+                <div className="flex gap-4 flex-1 flex-wrap">
+                    {/* Date Filter Button */}
                     <div className="flex items-center gap-2">
                         <label className="text-gray-400 text-sm">Date:</label>
-                        <select
-                            value={dateFilter}
-                            onChange={(e) => setDateFilter(e.target.value)}
-                            className="bg-dark-card border border-dark-border text-white px-3 py-2 rounded-lg focus:outline-none focus:border-neon-blue transition-colors"
+                        <button
+                            onClick={() => setShowDateModal(true)}
+                            className="bg-dark-card border border-dark-border text-white px-4 py-2 rounded-lg hover:border-neon-blue focus:outline-none focus:border-neon-blue transition-colors flex items-center gap-2"
                         >
-                            <option value="today">Today</option>
-                            <option value="month">This Month</option>
-                        </select>
+                            <CalendarIcon size={16} />
+                            <span>{filterLabel}</span>
+                        </button>
                     </div>
+
+                    {/* Quick Filters */}
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => handleQuickFilter('today', 'Today')}
+                            className={`px-3 py-2 rounded-lg text-sm transition-colors ${dateFilter === 'today'
+                                    ? 'bg-neon-blue text-black font-medium'
+                                    : 'bg-dark-card border border-dark-border text-gray-300 hover:border-neon-blue/50'
+                                }`}
+                        >
+                            Today
+                        </button>
+                        <button
+                            onClick={() => handleQuickFilter('this_month', 'This Month')}
+                            className={`px-3 py-2 rounded-lg text-sm transition-colors ${dateFilter === 'this_month'
+                                    ? 'bg-neon-blue text-black font-medium'
+                                    : 'bg-dark-card border border-dark-border text-gray-300 hover:border-neon-blue/50'
+                                }`}
+                        >
+                            This Month
+                        </button>
+                    </div>
+
+                    {/* Status Filter */}
                     <div className="flex items-center gap-2">
                         <label className="text-gray-400 text-sm">Status:</label>
                         <select
@@ -110,6 +156,13 @@ const Attendance = () => {
                     {records.length} record{records.length !== 1 ? 's' : ''}
                 </div>
             </div>
+
+            {/* Date Range Modal */}
+            <DateRangeModal
+                isOpen={showDateModal}
+                onClose={() => setShowDateModal(false)}
+                onApply={handleDateRangeApply}
+            />
 
             {/* Content */}
             <div className="glass-panel overflow-hidden">
@@ -158,8 +211,8 @@ const Attendance = () => {
                                         <td className="p-4 text-gray-400 font-mono">{r.break_hours || '0h 0m'}</td>
                                         <td className="p-4">
                                             <span className={`px-2 py-1 rounded-full text-xs font-medium border ${r.status === 'Present' ? 'bg-green-500/10 text-green-400 border-green-500/20' :
-                                                    r.status === 'Late' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' :
-                                                        'bg-red-500/10 text-red-400 border-red-500/20'
+                                                r.status === 'Late' ? 'bg-yellow-500/10 text-yellow-400 border-yellow-500/20' :
+                                                    'bg-red-500/10 text-red-400 border-red-500/20'
                                                 }`}>
                                                 {r.status}
                                             </span>

@@ -12,12 +12,28 @@
   .glass-panel {
     @apply bg-dark-card/60 backdrop-blur-xl border border-dark-border rounded-xl;
   }
-  
+
   .neon-text-blue {
     text-shadow: 0 0 10px #00f3ff, 0 0 20px #00f3ff;
   }
-  
+
   .neon-border-blue {
     box-shadow: 0 0 5px #00f3ff, inset 0 0 5px #00f3ff;
+  }
+
+  .animate-fade-in {
+    animation: fadeIn 0.2s ease-in-out;
+  }
+
+  @keyframes fadeIn {
+    from {
+      opacity: 0;
+      transform: scale(0.95);
+    }
+
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
   }
 }

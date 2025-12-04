@@ -139,7 +139,7 @@ const Employees = () => {
                             <th className="p-4">ID</th>
                             <th className="p-4">Department</th>
                             <th className="p-4">Designation</th>
-                            <th className="p-4">Status</th>
+                            <th className="p-4">Employment Status</th>
                             <th className="p-4 text-right">Actions</th>
                         </tr>
                     </thead>
@@ -167,7 +167,7 @@ const Employees = () => {
                                     <td className="p-4">{emp.designation}</td>
                                     <td className="p-4">
                                         <span className="px-2 py-1 rounded-full text-xs font-medium bg-green-500/10 text-green-400 border border-green-500/20">
-                                            Active
+                                            Employed
                                         </span>
                                     </td>
                                     <td className="p-4 text-right">
