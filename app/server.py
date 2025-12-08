@@ -866,9 +866,9 @@ def start_camera_thread(cam_config):
                             best_name = person['name']
                 
                 # Threshold logic
-                # SFace threshold: 0.363 is strict. 0.5 is lenient but safe for office.
+                # SFace threshold: 0.363 is strict. 0.7 is lenient/standard for unconstrained env.
                 is_match = False
-                if min_score < 0.5:
+                if min_score < 0.7:
                     # Potential Match
                     if best_name == last_recognized_name:
                         consecutive_matches = min(consecutive_matches + 1, 20)
