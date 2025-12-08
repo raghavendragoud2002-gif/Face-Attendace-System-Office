@@ -603,14 +603,22 @@ def generate(camera_id):
             with camera_locks[camera_id]:
                 frame = camera_frames.get(camera_id)
                 if frame is None:
-                    time.sleep(0.1)
-                    continue
-                
-                (flag, encodedImage) = cv2.imencode(".jpg", frame)
-                if not flag:
-                    continue
+                    # Yield a placeholder frame
+                    blank = np.zeros((480, 640, 3), np.uint8)
+                    cv2.putText(blank, "CONNECTING...", (200, 240), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                    (flag, encodedImage) = cv2.imencode(".jpg", blank)
+                    if not flag: continue
+                else:
+                    (flag, encodedImage) = cv2.imencode(".jpg", frame)
+                    if not flag: continue
+
             yield(b'--frame\r\n' b'Content-Type: image/jpeg\r\n\r\n' + 
                 bytearray(encodedImage) + b'\r\n')
+            
+            if frame is None:
+                time.sleep(0.5)
+            else:
+                time.sleep(0.03) # ~30 FPS
         else:
             time.sleep(1)
 

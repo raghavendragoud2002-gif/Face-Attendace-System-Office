@@ -54,7 +54,7 @@ const LiveFeed = () => {
         <div className="p-6 relative">
             <h1 className="text-3xl font-bold text-white mb-6 flex items-center gap-3">
                 <Video className="w-8 h-8 text-neon-blue" />
-                Live Surveillance
+                Live Monitor (v2)
             </h1>
 
             {/* Camera Grid */}
@@ -72,16 +72,15 @@ const LiveFeed = () => {
                                     {cam.source !== 0 && <Wifi className="w-3 h-3 text-gray-400" />}
                                 </div>
                                 <div className="flex items-center gap-2">
-                                    {/* Config Button (Only for IP Cams) */}
-                                    {cam.source !== 0 && (
-                                        <button
-                                            onClick={() => openConfig(cam)}
-                                            className="p-2 hover:bg-white/10 rounded-full text-white transition-colors"
-                                            title="Configure Camera IP"
-                                        >
-                                            <Settings size={20} />
-                                        </button>
-                                    )}
+                                    {/* Config Button (Forced Visible) */}
+                                    <button
+                                        onClick={() => openConfig(cam)}
+                                        className="p-2 hover:bg-white/10 rounded-full text-white transition-colors"
+                                        title="Configure Camera IP"
+                                    >
+                                        <Settings size={20} />
+                                    </button>
+
                                     <button
                                         onClick={() => toggleMaximize(cam.id)}
                                         className="p-2 hover:bg-white/10 rounded-full text-white transition-colors"
