@@ -22,7 +22,13 @@
   }
 
   .animate-fade-in {
-    animation: fadeIn 0.2s ease-in-out;
+    animation: fadeIn 0.3s ease-out;
+  }
+
+  /* Make date picker icon white on dark background */
+  input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+    cursor: pointer;
   }
 
   @keyframes fadeIn {

@@ -14,7 +14,9 @@ const Employees = () => {
         department: '',
         designation: '',
         email: '',
-        file: null
+        file_front: null,
+        file_left: null,
+        file_right: null
     });
 
     useEffect(() => {
@@ -36,7 +38,9 @@ const Employees = () => {
     };
 
     const handleFileChange = (e) => {
-        setFormData(prev => ({ ...prev, file: e.target.files[0] }));
+        const { name, files } = e.target;
+        // name will be 'front', 'left', or 'right'
+        setFormData(prev => ({ ...prev, [`file_${name}`]: files[0] }));
     };
 
     const handleSubmit = async (e) => {
@@ -52,15 +56,23 @@ const Employees = () => {
                 alert("Error updating employee: " + err.message);
             }
         } else {
-            if (!formData.file) {
-                alert("Please upload a face photo.");
+            if (!formData.file_front || !formData.file_left || !formData.file_right) {
+                alert("Please upload all 3 photos (Front, Left, Right).");
                 return;
             }
 
             const data = new FormData();
-            Object.keys(formData).forEach(key => {
-                data.append(key, formData[key]);
-            });
+            // Append text fields
+            data.append('name', formData.name);
+            data.append('employee_id', formData.employee_id);
+            data.append('department', formData.department);
+            data.append('designation', formData.designation);
+            data.append('email', formData.email);
+
+            // Append files
+            data.append('file_front', formData.file_front);
+            data.append('file_left', formData.file_left);
+            data.append('file_right', formData.file_right);
 
             try {
                 await axios.post('http://localhost:5001/api/employees', data, {
@@ -110,7 +122,9 @@ const Employees = () => {
             department: '',
             designation: '',
             email: '',
-            file: null
+            file_front: null,
+            file_left: null,
+            file_right: null
         });
     };
 
@@ -228,13 +242,35 @@ const Employees = () => {
                             </div>
 
                             {!isEditing && (
-                                <div className="border-2 border-dashed border-dark-border rounded-lg p-6 text-center hover:border-neon-blue transition-colors relative">
-                                    <input
-                                        type="file" accept="image/*" onChange={handleFileChange}
-                                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                                    />
-                                    <p className="text-gray-400">{formData.file ? formData.file.name : "Click to upload face photo"}</p>
-                                    <p className="text-xs text-gray-600 mt-2">Required for recognition</p>
+                                <div className="space-y-4">
+                                    <p className="text-gray-400 text-sm">Upload 3 Photos (Required for better accuracy)</p>
+
+                                    {/* Front Face */}
+                                    <div className="border-2 border-dashed border-dark-border rounded-lg p-4 text-center hover:border-neon-blue transition-colors relative">
+                                        <input
+                                            type="file" accept="image/*" name="front" onChange={handleFileChange}
+                                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                        />
+                                        <p className="text-gray-400">{formData.file_front ? formData.file_front.name : "1. Upload Front Face"}</p>
+                                    </div>
+
+                                    {/* Left Side */}
+                                    <div className="border-2 border-dashed border-dark-border rounded-lg p-4 text-center hover:border-neon-blue transition-colors relative">
+                                        <input
+                                            type="file" accept="image/*" name="left" onChange={handleFileChange}
+                                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                        />
+                                        <p className="text-gray-400">{formData.file_left ? formData.file_left.name : "2. Upload Left Side"}</p>
+                                    </div>
+
+                                    {/* Right Side */}
+                                    <div className="border-2 border-dashed border-dark-border rounded-lg p-4 text-center hover:border-neon-blue transition-colors relative">
+                                        <input
+                                            type="file" accept="image/*" name="right" onChange={handleFileChange}
+                                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                                        />
+                                        <p className="text-gray-400">{formData.file_right ? formData.file_right.name : "3. Upload Right Side"}</p>
+                                    </div>
                                 </div>
                             )}
 

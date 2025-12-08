@@ -50,8 +50,21 @@ def build_known():
         # Crop the face
         face_roi = img[y:y+h, x:x+w]
         
+        # Resize to standard size (200x200) for consistent feature extraction
+        # This fixes the scale mismatch between high-res uploads and low-res webcam
+        try:
+            face_roi = cv2.resize(face_roi, (200, 200))
+        except Exception as e:
+            print(f"[WARN] Could not resize face: {e}")
+            continue
+        
         # Convert to grayscale for ORB
         gray_face = cv2.cvtColor(face_roi, cv2.COLOR_BGR2GRAY)
+        
+        # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+        # This helps with lighting differences between webcam and enrollment
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        gray_face = clahe.apply(gray_face)
         
         kp, desc = orb.detectAndCompute(gray_face, None)
         if desc is None:

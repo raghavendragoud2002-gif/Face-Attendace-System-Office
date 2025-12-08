@@ -18,9 +18,15 @@ import mysql.connector
 # recognition imports
 import cv2
 import mediapipe as mp
+import numpy as np
 
-# local helpers (enroll_orb.py)
-from enroll_orb import build_known, IMAGES_DIR, KNOWN_PATH
+# local helpers
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR = os.path.join(BASE_DIR, '..', 'data')
+KNOWN_PATH = os.path.join(DATA_DIR, 'known_sface.pkl')
+IMAGES_DIR = os.path.join(DATA_DIR, 'images')
+
+# from enroll_orb import build_known, IMAGES_DIR, KNOWN_PATH # Deprecated
 
 # ---------- CONFIG ----------
 DB_CONFIG = {
@@ -165,17 +171,46 @@ def manage_employees():
         dept = request.form.get('department')
         desig = request.form.get('designation')
         email = request.form.get('email')
-        f = request.files.get('file')
         
-        if not f or not name or not emp_id:
-            return jsonify({'error': 'Missing required fields'}), 400
+        # Handle multiple files
+        files_to_save = []
+        if request.files.get('file_front'):
+            files_to_save.append(('front', request.files['file_front']))
+        if request.files.get('file_left'):
+            files_to_save.append(('left', request.files['file_left']))
+        if request.files.get('file_right'):
+            files_to_save.append(('right', request.files['file_right']))
+            
+        # Legacy support
+        if request.files.get('file'):
+            files_to_save.append(('front', request.files['file']))
+        
+        if not files_to_save or not name or not emp_id:
+            return jsonify({'error': 'Missing required fields (name, id, or photos)'}), 400
             
         safe_name = name.strip().replace(' ', '_')
-        ext = os.path.splitext(f.filename)[1] or '.jpg'
-        filename = f"{emp_id}_{safe_name}{ext}"
-        save_path = os.path.join(DATA_DIR, 'images', filename)
-        f.save(save_path)
+        primary_image_path = None
         
+        saved_count = 0
+        for suffix, f in files_to_save:
+            if f and f.filename:
+                ext = os.path.splitext(f.filename)[1] or '.jpg'
+                filename = f"{emp_id}_{safe_name}_{suffix}{ext}"
+                save_path = os.path.join(DATA_DIR, 'images', filename)
+                f.save(save_path)
+                saved_count += 1
+                
+                # Use front image as primary for DB
+                if suffix == 'front':
+                    primary_image_path = save_path
+        
+        # If no front image, use the first one saved as primary
+        if not primary_image_path and saved_count > 0:
+             # Reconstruct path of first file
+             suffix, f = files_to_save[0]
+             ext = os.path.splitext(f.filename)[1] or '.jpg'
+             primary_image_path = os.path.join(DATA_DIR, 'images', f"{emp_id}_{safe_name}_{suffix}{ext}")
+
         try:
             if DB_ONLINE:
                 conn = get_db()
@@ -183,7 +218,7 @@ def manage_employees():
                 cur.execute("""
                     INSERT INTO employees (name, employee_id, department, designation, email, image_path)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (name, emp_id, dept, desig, email, save_path))
+                """, (name, emp_id, dept, desig, email, primary_image_path))
                 conn.commit()
                 conn.close()
             else:
@@ -200,7 +235,7 @@ def manage_employees():
                     'department': dept,
                     'designation': desig,
                     'email': email,
-                    'image_path': save_path,
+                    'image_path': primary_image_path,
                     'created_at': str(datetime.now())
                 }
                 employees.insert(0, new_emp) # Add to top
@@ -746,198 +781,136 @@ def start_camera_thread(cam_config):
     
     def load_known():
         if not os.path.exists(KNOWN_PATH): return []
-        with open(KNOWN_PATH, 'rb') as f: return pickle.load(f)
+        try:
+            with open(KNOWN_PATH, 'rb') as f: return pickle.load(f)
+        except Exception as e:
+            print(f"[ERROR] Failed to load known faces: {e}")
+            return []
 
-    mp_face = mp.solutions.face_detection
-    orb = cv2.ORB_create(1000)
-    # CRITICAL FIX: crossCheck must be False for knnMatch
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+    # Initialize OpenCV DNN Models (Deep Learning)
+    DETECTOR_PATH = os.path.join(BASE_DIR, 'models', 'face_detection_yunet_2023mar.onnx')
+    RECOGNIZER_PATH = os.path.join(BASE_DIR, 'models', 'face_recognition_sface_2021dec.onnx')
+    
+    if not os.path.exists(DETECTOR_PATH) or not os.path.exists(RECOGNIZER_PATH):
+        print(f"[ERROR] Models not found! Please download YuNet and SFace models to app/models/")
+        return
+
+    detector = cv2.FaceDetectorYN.create(DETECTOR_PATH, "", (320, 320), 0.6, 0.3, 5000)
+    recognizer = cv2.FaceRecognizerSF.create(RECOGNIZER_PATH, "")
 
     cap = cv2.VideoCapture(source)
     
-    # Retry logic for IP cameras
     if not cap.isOpened():
         print(f"[WARN] Camera {cam_id} not found. Retrying in background...")
     
     known = load_known()
     last_known_mtime = os.path.getmtime(KNOWN_PATH) if os.path.exists(KNOWN_PATH) else 0
-    last_seen = {} 
-    last_recognized = {} # For per-person hysteresis
 
-    with mp_face.FaceDetection(model_selection=0, min_detection_confidence=0.6) as detector:
-        while True:
-            # Reconnect if needed
+    # Hysteresis State
+    consecutive_matches = 0
+    last_recognized_name = None
+
+    while True:
+        # Reconnect if needed
+        if not cap.isOpened():
+            cap.open(source)
             if not cap.isOpened():
-                cap.open(source)
-                if not cap.isOpened():
-                    time.sleep(5)
-                    continue
-                else:
-                    print(f"[OK] Camera {cam_id} connected.")
-
-            # Hot-Reload Known Faces
-            if os.path.exists(KNOWN_PATH):
-                mtime = os.path.getmtime(KNOWN_PATH)
-                if mtime > last_known_mtime:
-                    known = load_known()
-                    last_known_mtime = mtime
-
-            ret, frame = cap.read()
-            if not ret:
-                time.sleep(0.5)
+                time.sleep(5)
                 continue
-            
-            # --- Face Recognition Logic ---
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = detector.process(rgb)
-            
-            if results.detections:
-                for detection in results.detections:
-                    bboxC = detection.location_data.relative_bounding_box
-                    ih, iw, _ = frame.shape
-                    x, y, w, h = int(bboxC.xmin * iw), int(bboxC.ymin * ih), \
-                                 int(bboxC.width * iw), int(bboxC.height * ih)
+            else:
+                print(f"[OK] Camera {cam_id} connected.")
+
+        # Hot-Reload Known Faces
+        if os.path.exists(KNOWN_PATH):
+            mtime = os.path.getmtime(KNOWN_PATH)
+            if mtime > last_known_mtime:
+                print("[INFO] Reloading known faces...")
+                known = load_known()
+                last_known_mtime = mtime
+
+        ret, frame = cap.read()
+        if not ret:
+            time.sleep(0.5)
+            continue
+        
+        h, w, _ = frame.shape
+        detector.setInputSize((w, h))
+        
+        # Detect Faces (YuNet)
+        faces = detector.detect(frame)
+        
+        # Draw "Searching..." if no faces
+        if faces[1] is None:
+            consecutive_matches = max(0, consecutive_matches - 1)
+            if consecutive_matches == 0:
+                last_recognized_name = None
+        else:
+            for face in faces[1]:
+                # Face Coords
+                coords = face[:-1].astype(np.int32)
+                x, y, w_box, h_box = coords[0], coords[1], coords[2], coords[3]
+                
+                # Align & Recognize (SFace)
+                face_align = recognizer.alignCrop(frame, face)
+                face_feature = recognizer.feature(face_align)
+                
+                # Compare with Known Faces
+                min_score = 1.0 # Cosine Distance (0.0 = Identical, 1.0 = Opposite)
+                best_name = "Unknown"
+                
+                if len(known) > 0:
+                    for person in known:
+                        score = recognizer.match(face_feature, person['feature'], cv2.FaceRecognizerSF_FR_COSINE)
+                        if score < min_score:
+                            min_score = score
+                            best_name = person['name']
+                
+                # Threshold logic
+                # SFace threshold: 0.363 is strict. 0.5 is lenient but safe for office.
+                is_match = False
+                if min_score < 0.5:
+                    # Potential Match
+                    if best_name == last_recognized_name:
+                        consecutive_matches = min(consecutive_matches + 1, 20)
+                    else:
+                        if consecutive_matches > 0:
+                            consecutive_matches -= 1
+                        else:
+                            last_recognized_name = best_name
+                            consecutive_matches = 1
+                else:
+                    # Unknown
+                    consecutive_matches = max(0, consecutive_matches - 1)
+                    if consecutive_matches == 0:
+                        last_recognized_name = None
+                
+                # Confirm Match (Green)
+                if consecutive_matches >= 2: # Fast reaction (2 frames)
+                    is_match = True
+                    label = last_recognized_name
+                    color = (0, 255, 0)
                     
-                    # Ensure valid coordinates
-                    x, y = max(0, x), max(0, y)
-                    w, h = min(w, iw - x), min(h, ih - y)
-                    
-                    # Recognize FIRST, then draw box with appropriate color
-                    face_roi = frame[y:y+h, x:x+w]
-                    if face_roi.size == 0: 
-                        continue
-                    
-                    label = "Unknown"
-                    color = (0, 0, 255)  # Red for unknown
-                    recognized = False
-                    
+                    # Mark Attendance
                     try:
-                        kp, des = orb.detectAndCompute(face_roi, None)
-                        if des is not None and len(known) > 0:
-                            best_name = "Unknown"
-                            best_score = 0
-                            second_best_score = 0
-                            best_person = None
-                            
-                            for person in known:
-                                try:
-                                    # Handle both 'desc' (new) and 'des' (old) keys for compatibility
-                                    person_des = person.get('desc')
-                                    if person_des is None:
-                                        person_des = person.get('des')
-                                        
-                                    if person_des is None:
-                                        print(f"[WARN] No descriptors found for {person.get('name')}")
-                                        continue
-
-                                    matches = bf.knnMatch(des, person_des, k=2)
-                                    good = []
-                                    for pair in matches:
-                                        if len(pair) == 2:
-                                            m, n = pair
-                                            if m.distance < 0.75 * n.distance:
-                                                good.append(m)
-                                    
-                                    # Debug: Show score for each person
-                                    print(f"[DEBUG] Comparing with {person['name']}: {len(good)} good matches")
-                                    
-                                    # Find best match
-                                    if len(good) > best_score:
-                                        # If we already had a best score, that becomes the runner-up
-                                        second_best_score = best_score
-                                        best_score = len(good)
-                                        best_name = person['name']
-                                        best_person = person
-                                    elif len(good) > second_best_score:
-                                        second_best_score = len(good)
-                                        
-                                except Exception as e:
-                                    print(f"[WARN] Matching error for {person.get('name', 'unknown')}: {e}")
-                                    continue
-                    
-                            # Threshold for recognition
-                            # Lowered to 2 because 3 was too strict for this camera/lighting
-                            # Consecutive match check lowered to 2 frames
-                            
-                            is_match = False
-                            if best_score >= 2:
-                                if best_score > second_best_score:
-                                    # Potential match found
-                                    # Check if it's the same person as last frame
-                                    if best_name == last_recognized_name:
-                                        consecutive_matches += 1
-                                    else:
-                                        consecutive_matches = 1
-                                        last_recognized_name = best_name
-                                    
-                                    print(f"[DEBUG] Potential: {best_name} ({best_score}), Consecutive: {consecutive_matches}")
-                                    
-                                    # REQUIRE 2 CONSECUTIVE FRAMES to confirm match
-                                    if consecutive_matches >= 2:
-                                        is_match = True
-                                else:
-                                    # Ambiguous
-                                    consecutive_matches = 0
-                                    last_recognized_name = None
-                                    print(f"[DEBUG] Ambiguous: {best_score} vs {second_best_score}")
-                            else:
-                                # No good match
-                                consecutive_matches = 0
-                                last_recognized_name = None
-                                print(f"[DEBUG] No match: Best score {best_score} < 3")
-                                    
-                            if is_match:
-                                label = best_name
-                                color = (0, 255, 0)  # Green for recognized
-                                recognized = True
-                                
-                                # Mark Attendance
-                                try:
-                                    # Extract employee ID from filename (format: ID_Name or ID_Name_Name)
-                                    parts = best_name.split('_')
-                                    if len(parts) >= 1:
-                                        emp_id_str = parts[0]
-                                        # Verify it's a valid number
-                                        if emp_id_str.isdigit():
-                                            emp_id = int(emp_id_str)
-                                            
-                                            # Check throttle to avoid spamming
-                                            current_time = time.time()
-                                            last_time = last_seen.get(emp_id, 0)
-                                            
-                                            if current_time - last_time > ATTENDANCE_THROTTLE_SECONDS:
-                                                print(f"[RECOGNITION] Recognized: {best_name} (ID: {emp_id}) - Score: {best_score}")
-                                                mark_attendance(emp_id, best_name)
-                                                last_seen[emp_id] = current_time
-                                            # else: silently skip (within throttle period)
-                                        else:
-                                            print(f"[WARN] Invalid employee ID format in filename: {best_name}")
-                                    else:
-                                        print(f"[WARN] Cannot extract employee ID from filename: {best_name}")
-                                except Exception as e:
-                                    print(f"[ERROR] Attendance marking failed for {best_name}: {e}")
-                                    import traceback
-                                    traceback.print_exc()
-                            else:
-                                label = "Unknown"
-                                color = (0, 0, 255)  # Red for unknown
-                    
+                        parts = label.split('_')
+                        if len(parts) >= 2:
+                            emp_id = parts[0]
+                            emp_name = parts[1]
+                            mark_attendance(emp_id, emp_name)
                     except Exception as e:
-                        print(f"[ERROR] Recognition error: {e}")
-                        pass
-                    
-                    # Draw box AFTER recognition with correct color
-                    cv2.rectangle(frame, (x, y), (x + w, y + h), color, 2)
-                    
-                    # Draw label with background for better visibility
-                    label_size, _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
-                    cv2.rectangle(frame, (x, y - label_size[1] - 10), (x + label_size[0], y), color, -1)
-                    cv2.putText(frame, label, (x, y - 5), 
-                              cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                        print(f"[ERROR] Mark attendance failed: {e}")
+                else:
+                    is_match = False
+                    label = "Unknown"
+                    color = (0, 0, 255)
 
-            # Update Global Frame
-            with camera_locks[cam_id]:
-                camera_frames[cam_id] = frame.copy()
+                # Draw Box & Label
+                cv2.rectangle(frame, (x, y), (x+w_box, y+h_box), color, 2)
+                cv2.putText(frame, f"{label} ({min_score:.2f})", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        # Update Global Frame
+        with camera_locks[cam_id]:
+            camera_frames[cam_id] = frame.copy()
 
 if __name__ == '__main__':
     # Start threads for each camera
