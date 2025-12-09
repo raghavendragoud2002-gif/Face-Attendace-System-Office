@@ -35,11 +35,92 @@ DB_CONFIG = {
     'password': "Raghu@3033",
     'database': 'face_attendance'
 }
-# Camera Configuration
-CAMERAS = [
-    {'id': 0, 'source': 0, 'name': 'Main Entrance (Webcam)'},
-    {'id': 1, 'source': 'http://10.122.3.222:8080/video', 'name': 'Office Area (Wireless)'}
-]
+# Camera Configuration File
+CAMERAS_FILE = os.path.join(BASE_DIR, '..', 'data', 'cameras.json')
+
+def load_cameras():
+    if os.path.exists(CAMERAS_FILE):
+        try:
+            with open(CAMERAS_FILE, 'r') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"[ERROR] Failed to load cameras.json: {e}")
+    # Default Config
+    return [
+        {'id': 0, 'source': 0, 'name': 'Main Entrance (Webcam)'},
+        {'id': 1, 'source': 'http://10.150.144.63:8080/video', 'name': 'Office Area (Wireless)'}
+    ]
+
+def save_cameras(cameras):
+    try:
+        with open(CAMERAS_FILE, 'w') as f:
+            json.dump(cameras, f, indent=4)
+        print("[INFO] Saved camera config to cameras.json")
+    except Exception as e:
+        print(f"[ERROR] Failed to save cameras.json: {e}")
+
+
+def build_known():
+    print("[INFO] Rebuilding known faces...")
+    # Initialize Models
+    DETECTOR_PATH = os.path.join(BASE_DIR, 'models', 'face_detection_yunet_2023mar.onnx')
+    RECOGNIZER_PATH = os.path.join(BASE_DIR, 'models', 'face_recognition_sface_2021dec.onnx')
+    
+    if not os.path.exists(DETECTOR_PATH) or not os.path.exists(RECOGNIZER_PATH):
+        print("[ERROR] Models not found for build_known!")
+        return
+
+    try:
+         # Use local instances to avoid threading issues
+         detector = cv2.FaceDetectorYN.create(DETECTOR_PATH, "", (320, 320), 0.6, 0.3, 5000)
+         recognizer = cv2.FaceRecognizerSF.create(RECOGNIZER_PATH, "")
+    except Exception as e:
+        print(f"[ERROR] Failed to load models in build_known: {e}")
+        return
+
+    known_faces = []
+    if not os.path.exists(IMAGES_DIR):
+        print(f"[WARN] Images dir not found: {IMAGES_DIR}")
+        return
+
+    files = [f for f in os.listdir(IMAGES_DIR) if f.lower().endswith(('.jpg', '.jpeg', '.png'))]
+    
+    for filename in files:
+        path = os.path.join(IMAGES_DIR, filename)
+        name_part = os.path.splitext(filename)[0]
+        parts = name_part.split('_')
+        
+        emp_id = None
+        full_name = name_part
+        if len(parts) >= 2:
+            emp_id = parts[0]
+            full_name = f"{parts[0]}_{parts[1]}"
+        
+        img = cv2.imread(path)
+        if img is None: continue
+        
+        h, w, _ = img.shape
+        detector.setInputSize((w, h))
+        faces = detector.detect(img)
+        if faces[1] is not None:
+            # Take highest confidence face
+            face = faces[1][0]
+            face_align = recognizer.alignCrop(img, face)
+            face_feature = recognizer.feature(face_align)
+            
+            known_faces.append({
+                'id': emp_id,
+                'name': full_name,
+                'feature': face_feature,
+                'filename': filename
+            })
+            
+    with open(KNOWN_PATH, 'wb') as f:
+        pickle.dump(known_faces, f)
+    print(f"[INFO] Rebuilt known faces: {len(known_faces)} enrolled.")
+
+# Initialize Global Cameras
+CAMERAS = load_cameras()
 ATTENDANCE_THROTTLE_SECONDS = 60 * 5 # 5 minutes throttle
 
 # Global State for Multi-Camera
@@ -588,8 +669,21 @@ def get_stats():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/cameras', methods=['GET'])
-def get_cameras():
+@app.route('/api/cameras', methods=['GET', 'POST'])
+def handle_cameras():
+    global CAMERAS
+    if request.method == 'POST':
+        try:
+            new_config = request.json
+            # Validate
+            if not isinstance(new_config, list):
+                return jsonify({"error": "Invalid format"}), 400
+            
+            CAMERAS = new_config
+            save_cameras(CAMERAS)
+            return jsonify({"status": "updated", "cameras": CAMERAS})
+        except Exception as e:
+            return jsonify({"error": str(e)}), 500
     return jsonify(CAMERAS)
 
 @app.route('/latest')
@@ -817,8 +911,26 @@ def start_camera_thread(cam_config):
     # Hysteresis State
     consecutive_matches = 0
     last_recognized_name = None
+    
+    # Optimization State
+    frame_count = 0
+    PROCESS_EVERY_N_FRAMES = 3
+    last_processed_faces = None # Stores (faces, names) for display
 
     while True:
+        # --- DYNAMIC CONFIG CHECK ---
+        # Check if global config changed for this camera ID
+        current_config = next((c for c in CAMERAS if c['id'] == cam_id), None)
+        if current_config:
+            new_source = current_config['source']
+            if new_source != source:
+                print(f"[INFO] Camera {cam_id} source changed: {source} -> {new_source}")
+                source = new_source
+                cap.release()
+                cap = cv2.VideoCapture(source)
+                if isinstance(source, str) and source.startswith('http'):
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
         # Reconnect if needed
         if not cap.isOpened():
             cap.open(source)
@@ -827,6 +939,8 @@ def start_camera_thread(cam_config):
                 continue
             else:
                 print(f"[OK] Camera {cam_id} connected.")
+                if isinstance(source, str) and source.startswith('http'):
+                    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         # Hot-Reload Known Faces
         if os.path.exists(KNOWN_PATH):
@@ -841,80 +955,107 @@ def start_camera_thread(cam_config):
             time.sleep(0.5)
             continue
         
+        # Resize for Display/Processing (Standardize)
+        # If frame is huge (e.g. 1080p), resize to 640x480 for speed
         h, w, _ = frame.shape
-        detector.setInputSize((w, h))
+        if w > 800:
+            frame = cv2.resize(frame, (800, 600))
+            h, w, _ = frame.shape
+
+        frame_count += 1
         
-        # Detect Faces (YuNet)
-        faces = detector.detect(frame)
-        
-        # Draw "Searching..." if no faces
-        if faces[1] is None:
-            consecutive_matches = max(0, consecutive_matches - 1)
-            if consecutive_matches == 0:
-                last_recognized_name = None
+        # --- FRAME SKIPPING LOGIC ---
+        if frame_count % PROCESS_EVERY_N_FRAMES != 0 and last_processed_faces is not None:
+            # Skip processing, just draw last results
+            faces, recognized_names = last_processed_faces
         else:
-            for face in faces[1]:
-                # Face Coords
-                coords = face[:-1].astype(np.int32)
-                x, y, w_box, h_box = coords[0], coords[1], coords[2], coords[3]
-                
-                # Align & Recognize (SFace)
-                face_align = recognizer.alignCrop(frame, face)
-                face_feature = recognizer.feature(face_align)
-                
-                # Compare with Known Faces
-                min_score = 1.0 # Cosine Distance (0.0 = Identical, 1.0 = Opposite)
-                best_name = "Unknown"
-                
-                if len(known) > 0:
-                    for person in known:
-                        score = recognizer.match(face_feature, person['feature'], cv2.FaceRecognizerSF_FR_COSINE)
-                        if score < min_score:
-                            min_score = score
-                            best_name = person['name']
-                
-                # Threshold logic
-                # SFace threshold: 0.363 is strict. 0.7 is lenient/standard for unconstrained env.
-                is_match = False
-                if min_score < 0.7:
-                    # Potential Match
-                    if best_name == last_recognized_name:
-                        consecutive_matches = min(consecutive_matches + 1, 20)
-                    else:
-                        if consecutive_matches > 0:
-                            consecutive_matches -= 1
+            # Process this frame
+            detector.setInputSize((w, h))
+            faces = detector.detect(frame)
+            recognized_names = []
+            
+            if faces[1] is not None:
+                for face in faces[1]:
+                    # Face Coords
+                    coords = face[:-1].astype(np.int32)
+                    x, y, w_box, h_box = coords[0], coords[1], coords[2], coords[3]
+                    
+                    # Align & Recognize (SFace)
+                    face_align = recognizer.alignCrop(frame, face)
+                    face_feature = recognizer.feature(face_align)
+                    
+                    # Compare with Known Faces
+                    min_score = 1.0 # Cosine Distance
+                    best_name = "Unknown"
+                    best_id = None
+                    
+                    if len(known) > 0:
+                        for person in known:
+                            score = recognizer.match(face_feature, person['feature'], cv2.FaceRecognizerSF_FR_COSINE)
+                            if score < min_score:
+                                min_score = score
+                                temp_name = person['name']
+                                temp_id = person.get('id')
+                                
+                                # Fallback: Extract ID from name (Format: ID_Name)
+                                if not temp_id and '_' in temp_name:
+                                    try:
+                                        parts = temp_name.split('_')
+                                        temp_id = parts[0]
+                                        # Optional: You might want to strip the ID from the display name
+                                        # temp_name = parts[1] 
+                                    except:
+                                        pass
+
+                                best_name = temp_name
+                                best_id = temp_id
+                    
+                    # Threshold logic
+                    # SFace threshold: 0.363 is strict. 0.7 is lenient/standard for unconstrained env.
+                    is_match = False
+                    if min_score < 0.7:
+                        # Potential Match
+                        if best_name == last_recognized_name:
+                            consecutive_matches = min(consecutive_matches + 1, 20)
                         else:
+                            consecutive_matches = 0
                             last_recognized_name = best_name
-                            consecutive_matches = 1
-                else:
-                    # Unknown
-                    consecutive_matches = max(0, consecutive_matches - 1)
-                    if consecutive_matches == 0:
-                        last_recognized_name = None
-                
-                # Confirm Match (Green)
-                if consecutive_matches >= 2: # Fast reaction (2 frames)
-                    is_match = True
-                    label = last_recognized_name
-                    color = (0, 255, 0)
+                        
+                        if consecutive_matches > 2: # Require 3 consecutive frames
+                            is_match = True
+                    else:
+                        consecutive_matches = max(0, consecutive_matches - 1)
+                        if consecutive_matches == 0:
+                            last_recognized_name = None
+
+                    # Final Name Decision
+                    display_name = best_name if is_match else "Unknown"
+                    recognized_names.append((display_name, min_score, best_id, coords))
                     
                     # Mark Attendance
-                    try:
-                        parts = label.split('_')
-                        if len(parts) >= 2:
-                            emp_id = parts[0]
-                            emp_name = parts[1]
-                            mark_attendance(emp_id, emp_name)
-                    except Exception as e:
-                        print(f"[ERROR] Mark attendance failed: {e}")
-                else:
-                    is_match = False
-                    label = "Unknown"
-                    color = (0, 0, 255)
+                    if is_match and best_id:
+                        mark_attendance(best_id, best_name)
+            
+            # Update Cache
+            last_processed_faces = (faces, recognized_names)
 
-                # Draw Box & Label
+        # --- DRAWING ---
+        # Draw results (either fresh or cached)
+        if last_processed_faces:
+            _, current_names = last_processed_faces
+            for name, score, _, coords in current_names:
+                x, y, w_box, h_box = coords[0], coords[1], coords[2], coords[3]
+                color = (0, 255, 0) if name != "Unknown" else (0, 0, 255)
+                
                 cv2.rectangle(frame, (x, y), (x+w_box, y+h_box), color, 2)
-                cv2.putText(frame, f"{label} ({min_score:.2f})", (x, y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+                
+                label = f"{name} ({score:.2f})"
+                cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+
+        # Update global frame
+        with camera_locks[cam_id]:
+            camera_frames[cam_id] = frame.copy()
+
 
         # Update Global Frame
         with camera_locks[cam_id]:
